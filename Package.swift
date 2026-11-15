@@ -2,16 +2,16 @@
 import PackageDescription
 
 let package = Package(
-    name: "video-enhancer",
+    name: "master-reel",
     platforms: [.macOS(.v26)],
     products: [
-        .executable(name: "video-enhancer", targets: ["VideoEnhancer"]),
+        .executable(name: "master-reel", targets: ["MasterReel"]),
     ],
     targets: [
-        .executableTarget(name: "VideoEnhancer"),
+        .executableTarget(name: "MasterReel"),
         .testTarget(
-            name: "VideoEnhancerTests",
-            dependencies: ["VideoEnhancer"],
+            name: "MasterReelTests",
+            dependencies: ["MasterReel"],
             resources: [.copy("Fixtures")]
         ),
     ]

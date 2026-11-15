@@ -1,5 +1,5 @@
 import Testing
-@testable import VideoEnhancer
+@testable import MasterReel
 
 struct ArgumentsTests {
     @Test func 入力と出力を受け取り既定は画像モード() throws {

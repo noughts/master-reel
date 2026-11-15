@@ -1,7 +1,7 @@
 import AVFoundation
 import Testing
 import VideoToolbox
-@testable import VideoEnhancer
+@testable import MasterReel
 
 /// 実際の VideoToolbox・AVFoundation・ファイルを通した統合テスト。
 @Suite(.enabled(if: VTSuperResolutionScalerConfiguration.isSupported, "この Mac は超解像に非対応"))

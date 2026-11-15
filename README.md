@@ -1,4 +1,4 @@
-# video-enhancer
+# Master Reel（master-reel）
 
 macOS の VideoToolbox に入っている AI 超解像（`VTSuperResolutionScaler`）を使って、動画を高解像度化する CLI です。
 848x480 の動画なら 3392x1920 に、縦横それぞれ 4 倍に拡大します。
@@ -15,12 +15,12 @@ macOS の VideoToolbox に入っている AI 超解像（`VTSuperResolutionScale
 swift build -c release
 ```
 
-実行ファイルは `.build/release/video-enhancer` にできます。
+実行ファイルは `.build/release/master-reel` にできます。
 
 ## 使い方
 
 ```bash
-.build/release/video-enhancer 入力.mp4 出力.mp4
+.build/release/master-reel 入力.mp4 出力.mp4
 ```
 
 - 出力のコンテナ形式は拡張子（`.mov` / `.mp4` / `.m4v`）で決まります。
@@ -65,7 +65,7 @@ swift test
 | `ArgumentsTests` | 引数の解析 |
 | `EncodingSettingsTests` | 出力形式・エンコード設定 |
 | `ProgressTests` | 進捗表示の文字列 |
-| `SuperResolutionTests` | 実際に VideoToolbox で超解像する統合テスト。`Tests/VideoEnhancerTests/Fixtures` の小さな動画を使う |
+| `SuperResolutionTests` | 実際に VideoToolbox で超解像する統合テスト。`Tests/MasterReelTests/Fixtures` の小さな動画を使う |
 
 `SuperResolutionTests` は、超解像に対応していない Mac では自動でスキップされます。
 

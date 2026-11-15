@@ -1,7 +1,7 @@
 import AVFoundation
 import Testing
 import VideoToolbox
-@testable import VideoEnhancer
+@testable import MasterReel
 
 struct EncodingSettingsTests {
     @Test func 拡張子からコンテナ形式を決める() {

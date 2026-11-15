@@ -12,7 +12,7 @@ struct UsageError: Error, Equatable {
 }
 
 let usage = """
-    使い方: video-enhancer <入力動画> <出力動画>
+    使い方: master-reel <入力動画> <出力動画>
 
     VideoToolbox の VTSuperResolutionScaler で動画を超解像します。
     出力は HEVC で、音声トラックは再エンコードせずにコピーします。

@@ -1,5 +1,5 @@
 import Testing
-@testable import VideoEnhancer
+@testable import MasterReel
 
 struct ProgressTests {
     @Test func 途中では割合と速度と残り時間を出す() {
