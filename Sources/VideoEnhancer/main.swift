@@ -9,9 +9,9 @@ do {
     switch try parseArguments(Array(CommandLine.arguments.dropFirst())) {
     case .help:
         print(usage)
-    case let .upscale(input, output):
+    case let .upscale(input, output, inputType):
         let start = ContinuousClock.now
-        try await upscaleVideo(input: URL(filePath: input), output: URL(filePath: output))
+        try await upscaleVideo(input: URL(filePath: input), output: URL(filePath: output), inputType: inputType)
         let elapsed = (ContinuousClock.now - start) / .seconds(1)
         printStatus("完了しました: \(output)（\(formatDuration(elapsed))）")
     }

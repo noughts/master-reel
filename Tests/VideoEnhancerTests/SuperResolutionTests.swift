@@ -6,11 +6,12 @@ import VideoToolbox
 /// 実際の VideoToolbox・AVFoundation・ファイルを通した統合テスト。
 @Suite(.enabled(if: VTSuperResolutionScalerConfiguration.isSupported, "この Mac は超解像に非対応"))
 struct SuperResolutionTests {
-    @Test func 映像を超解像し音声をそのまま引き継ぐ() async throws {
+    @Test(arguments: [VTSuperResolutionScalerConfiguration.InputType.video, .image])
+    func 映像を超解像し音声をそのまま引き継ぐ(inputType: VTSuperResolutionScalerConfiguration.InputType) async throws {
         let output = temporaryURL("mov")
         defer { try? FileManager.default.removeItem(at: output) }
 
-        try await upscaleVideo(input: fixture("small.mp4"), output: output)
+        try await upscaleVideo(input: fixture("small.mp4"), output: output, inputType: inputType)
 
         let scale = try #require(VTSuperResolutionScalerConfiguration.supportedScaleFactors.max())
         let asset = AVURLAsset(url: output)
@@ -33,7 +34,7 @@ struct SuperResolutionTests {
         let output = temporaryURL("mov")
         defer { try? FileManager.default.removeItem(at: output) }
 
-        try await upscaleVideo(input: fixture(name), output: output)
+        try await upscaleVideo(input: fixture(name), output: output, inputType: .video)
 
         let video = try #require(try await AVURLAsset(url: output).loadTracks(withMediaType: .video).first)
         let format = try #require(try await video.load(.formatDescriptions).first)
@@ -43,7 +44,7 @@ struct SuperResolutionTests {
     @Test func 上限を超える解像度はエラーで出力を作らない() async throws {
         let output = temporaryURL("mp4")
         let error = try await #require(throws: UpscaleError.self) {
-            try await upscaleVideo(input: fixture("too-large.mp4"), output: output)
+            try await upscaleVideo(input: fixture("too-large.mp4"), output: output, inputType: .video)
         }
         #expect(error.errorDescription == "入力解像度 1920x1440 は超解像の対象外です（上限 1920x1080）。")
         #expect(!FileManager.default.fileExists(atPath: output.path))
@@ -55,7 +56,7 @@ struct SuperResolutionTests {
         defer { try? FileManager.default.removeItem(at: output) }
 
         let error = try await #require(throws: UpscaleError.self) {
-            try await upscaleVideo(input: fixture("small.mp4"), output: output)
+            try await upscaleVideo(input: fixture("small.mp4"), output: output, inputType: .video)
         }
         #expect(error.errorDescription == "出力ファイルが既に存在します: \(output.path)")
         #expect(try Data(contentsOf: output) == Data("existing".utf8))
@@ -63,14 +64,14 @@ struct SuperResolutionTests {
 
     @Test func 存在しない入力はエラー() async throws {
         let error = try await #require(throws: UpscaleError.self) {
-            try await upscaleVideo(input: URL(filePath: "/nonexistent.mp4"), output: temporaryURL("mp4"))
+            try await upscaleVideo(input: URL(filePath: "/nonexistent.mp4"), output: temporaryURL("mp4"), inputType: .video)
         }
         #expect(error.errorDescription == "入力ファイルが見つかりません: /nonexistent.mp4")
     }
 
     @Test func 非対応の拡張子はエラー() async throws {
         let error = try await #require(throws: UpscaleError.self) {
-            try await upscaleVideo(input: fixture("small.mp4"), output: temporaryURL("mkv"))
+            try await upscaleVideo(input: fixture("small.mp4"), output: temporaryURL("mkv"), inputType: .video)
         }
         #expect(error.errorDescription == "出力の拡張子 .mkv には対応していません（.mov / .mp4 / .m4v のいずれか）。")
     }

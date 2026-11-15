@@ -2,8 +2,13 @@ import Testing
 @testable import VideoEnhancer
 
 struct ArgumentsTests {
-    @Test func 入力と出力を受け取る() throws {
-        #expect(try parseArguments(["in.mp4", "out.mov"]) == .upscale(input: "in.mp4", output: "out.mov"))
+    @Test func 入力と出力を受け取り既定は画像モード() throws {
+        #expect(try parseArguments(["in.mp4", "out.mov"]) == .upscale(input: "in.mp4", output: "out.mov", inputType: .image))
+    }
+
+    @Test(arguments: [["--video", "in.mp4", "out.mov"], ["in.mp4", "out.mov", "--video"]])
+    func videoを指定すると動画モード(arguments: [String]) throws {
+        #expect(try parseArguments(arguments) == .upscale(input: "in.mp4", output: "out.mov", inputType: .video))
     }
 
     @Test(arguments: [["-h"], ["--help"], ["in.mp4", "--help"]])

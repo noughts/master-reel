@@ -7,7 +7,7 @@ enum UpscaleError: LocalizedError {
     case outputExists(String)
     case noVideoTrack
     case processorUnsupported
-    case unsupportedResolution(width: Int, height: Int)
+    case unsupportedResolution(width: Int, height: Int, inputType: VTSuperResolutionScalerConfiguration.InputType)
     case frameSetupFailed
     case readFailed(Error?)
     case writeFailed(Error?)
@@ -24,8 +24,8 @@ enum UpscaleError: LocalizedError {
             "入力ファイルに映像トラックがありません。"
         case .processorUnsupported:
             "この Mac では VTSuperResolutionScaler を利用できません。"
-        case let .unsupportedResolution(width, height):
-            "入力解像度 \(width)x\(height) は超解像の対象外です（上限 1920x1080）。"
+        case let .unsupportedResolution(width, height, inputType):
+            "入力解像度 \(width)x\(height) は超解像の対象外です（上限 \(inputType == .image ? "1920x1920" : "1920x1080")）。"
         case .frameSetupFailed:
             "超解像するフレームの準備に失敗しました。"
         case let .readFailed(error):
@@ -43,8 +43,9 @@ private typealias ProcessedFrame = (source: VTFrameProcessorFrame, output: VTFra
 private typealias AudioPassthrough = (output: AVAssetReaderTrackOutput, input: AVAssetWriterInput)
 
 /// 入力動画を超解像して出力ファイルに書き出す。
+/// inputType が .video なら前フレームを参照して時間方向に安定させ、.image なら各フレームを独立に処理する。
 /// ファイルの読み書き、ML モデルのダウンロード、標準エラーへの進捗出力を伴う。
-func upscaleVideo(input: URL, output: URL) async throws {
+func upscaleVideo(input: URL, output: URL, inputType: VTSuperResolutionScalerConfiguration.InputType) async throws {
     guard let fileType = outputFileType(forPathExtension: output.pathExtension) else {
         throw UpscaleError.unsupportedOutputType(output.pathExtension)
     }
@@ -68,7 +69,7 @@ func upscaleVideo(input: URL, output: URL) async throws {
     let (size, transform) = try await videoTrack.load(.naturalSize, .preferredTransform)
     let duration = try await asset.load(.duration)
 
-    let configuration = try makeConfiguration(width: Int(size.width), height: Int(size.height))
+    let configuration = try makeConfiguration(width: Int(size.width), height: Int(size.height), inputType: inputType)
     try await ensureModelAvailable(for: configuration)
     let outputWidth = configuration.frameWidth * configuration.scaleFactor
     let outputHeight = configuration.frameHeight * configuration.scaleFactor
@@ -108,7 +109,7 @@ func upscaleVideo(input: URL, output: URL) async throws {
     defer { processor.endSession() }
 
     do {
-        try await transfer(video: (videoOutput, adaptor), audio: audio, processor: processor, duration: duration.seconds)
+        try await transfer(video: (videoOutput, adaptor), audio: audio, processor: processor, inputType: inputType, duration: duration.seconds)
     } catch {
         // 書き出し側が原因なら、その理由を優先して伝える。
         let cause = writer.status == .failed ? UpscaleError.writeFailed(writer.error) : error
@@ -123,7 +124,11 @@ func upscaleVideo(input: URL, output: URL) async throws {
 }
 
 /// 入力解像度に対する超解像の設定を作る。対応できるうちで最大の倍率を使う。
-private func makeConfiguration(width: Int, height: Int) throws -> VTSuperResolutionScalerConfiguration {
+private func makeConfiguration(
+    width: Int,
+    height: Int,
+    inputType: VTSuperResolutionScalerConfiguration.InputType
+) throws -> VTSuperResolutionScalerConfiguration {
     guard
         VTSuperResolutionScalerConfiguration.isSupported,
         let scaleFactor = VTSuperResolutionScalerConfiguration.supportedScaleFactors.max()
@@ -132,11 +137,11 @@ private func makeConfiguration(width: Int, height: Int) throws -> VTSuperResolut
         frameWidth: width,
         frameHeight: height,
         scaleFactor: scaleFactor,
-        inputType: .video,
+        inputType: inputType,
         usePrecomputedFlow: false,
         qualityPrioritization: .normal,
         revision: VTSuperResolutionScalerConfiguration.defaultRevision
-    ) else { throw UpscaleError.unsupportedResolution(width: width, height: height) }
+    ) else { throw UpscaleError.unsupportedResolution(width: width, height: height, inputType: inputType) }
     return configuration
 }
 
@@ -163,11 +168,14 @@ private func transfer(
     video: (output: AVAssetReaderTrackOutput, adaptor: AVAssetWriterInputPixelBufferAdaptor),
     audio: [AudioPassthrough],
     processor: VTFrameProcessor,
+    inputType: VTSuperResolutionScalerConfiguration.InputType,
     duration: Double
 ) async throws {
     let videoInput = video.adaptor.assetWriterInput
     var videoFinished = false
     var pendingAudio = audio
+    // 動画モードは前フレームを参照して順に処理し、画像モードは各フレームを独立に処理する。
+    let submissionMode: VTSuperResolutionScalerParameters.SubmissionMode = inputType == .video ? .sequential : .random
     var previous: ProcessedFrame?
     var frames = 0
     let start = ContinuousClock.now
@@ -180,7 +188,7 @@ private func transfer(
             if let sample = video.output.copyNextSampleBuffer() {
                 if let sourceBuffer = sample.imageBuffer {
                     let time = sample.presentationTimeStamp
-                    let frame = try await upscaleFrame(sourceBuffer, at: time, previous: previous, processor: processor, pool: video.adaptor.pixelBufferPool)
+                    let frame = try await upscaleFrame(sourceBuffer, at: time, previous: previous, submissionMode: submissionMode, processor: processor, pool: video.adaptor.pixelBufferPool)
                     guard video.adaptor.append(frame.output.buffer, withPresentationTime: time) else {
                         throw UpscaleError.writeFailed(nil)
                     }
@@ -218,11 +226,13 @@ private func transfer(
     }
 }
 
-/// 1フレームを超解像する。前フレームの入力と出力を渡すと、フレーム間のちらつきが抑えられる。
+/// 1フレームを超解像する。.sequential では前フレームの入力と出力を参照し、フレーム間のちらつきを抑える。
+/// .random では前フレームを参照せず、フレームを独立に処理する。
 private func upscaleFrame(
     _ sourceBuffer: CVPixelBuffer,
     at time: CMTime,
     previous: ProcessedFrame?,
+    submissionMode: VTSuperResolutionScalerParameters.SubmissionMode,
     processor: VTFrameProcessor,
     pool: CVPixelBufferPool?
 ) async throws -> ProcessedFrame {
@@ -235,10 +245,10 @@ private func upscaleFrame(
         let output = VTFrameProcessorFrame(buffer: outputBuffer, presentationTimeStamp: time),
         let parameters = VTSuperResolutionScalerParameters(
             sourceFrame: source,
-            previousFrame: previous?.source,
-            previousOutputFrame: previous?.output,
+            previousFrame: submissionMode == .sequential ? previous?.source : nil,
+            previousOutputFrame: submissionMode == .sequential ? previous?.output : nil,
             opticalFlow: nil,
-            submissionMode: .sequential,
+            submissionMode: submissionMode,
             destinationFrame: output
         )
     else { throw UpscaleError.frameSetupFailed }
