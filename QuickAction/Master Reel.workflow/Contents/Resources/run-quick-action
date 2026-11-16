@@ -1,0 +1,43 @@
+#!/bin/zsh
+# Finder のクイックアクション「超解像」から、選択された動画のパスを受け取って実行される。
+# 各動画を同じフォルダに「元の名前-4x.拡張子」として超解像し、結果を通知で知らせる。
+
+set -u
+
+readonly cli="${0:A:h}/master-reel"
+
+# 通知センターに通知を出す（副作用）。
+notify() {
+    /usr/bin/osascript - "$1" "$2" <<'APPLESCRIPT'
+on run arguments
+    display notification (item 2 of arguments) with title (item 1 of arguments)
+end run
+APPLESCRIPT
+}
+
+# 書き出し先のパスを決める。master-reel は上書きしないので、同名のファイルがあれば番号を付ける。
+output_path() {
+    local input="$1"
+    local extension="${input:e:l}"
+    # 対応する拡張子は EncodingSettings.swift の outputFileType と合わせる。
+    [[ "$extension" == (mov|mp4|m4v) ]] || extension=mov
+    local base="${input:r}-4x"
+    local candidate="$base.$extension"
+    local number=2
+    while [[ -e "$candidate" ]]; do
+        candidate="$base $number.$extension"
+        (( number++ ))
+    done
+    print -r -- "$candidate"
+}
+
+for input in "$@"; do
+    output=$(output_path "$input")
+    if log=$("$cli" "$input" "$output" 2>&1); then
+        notify "超解像が完了しました" "${output:t}"
+    else
+        # 進捗表示と同じ行に続くことがあるので、最後の「エラー: 」以降の1行を取り出す。
+        message="${log##*エラー: }"
+        notify "超解像に失敗しました" "${input:t}: ${message%%$'\n'*}"
+    fi
+done
