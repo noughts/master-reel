@@ -34,6 +34,30 @@ swift build -c release
 | `--video` | 動画モードで超解像します（後述） |
 | `-h`, `--help` | ヘルプを表示します |
 
+## Finder の右クリックから使う
+
+```bash
+QuickAction/install.sh
+```
+
+リリースビルドを行い、クイックアクション「超解像」を `~/Library/Services/Master Reel.workflow` にインストールします。
+再実行すると、ビルドし直したものに置き換わります。
+
+- Finder で動画を右クリックし、「超解像」を選ぶと実行されます。
+- 出力は入力と同じフォルダに `元の名前-4x.拡張子` で書き出します。
+  - 拡張子が `.mov` / `.mp4` / `.m4v` 以外の入力は `.mov` で書き出します。
+  - 同じ名前のファイルがあれば `元の名前-4x 2.拡張子` のように番号を付けます。
+- 画像モード（既定）で処理し、完了・失敗は通知で知らせます。集中モード中はバナーが出ず、通知センターに残ります。
+- 「デスクトップ」「書類」「ダウンロード」の動画で初めて使うときは、フォルダへのアクセス許可を求めるダイアログが出ます。
+- アンインストールするには `~/Library/Services/Master Reel.workflow` を削除します。
+
+| ファイル | 役割 |
+|---|---|
+| `QuickAction/install.sh` | ビルドしてインストールする |
+| `QuickAction/Master Reel.workflow/Contents/Info.plist` | メニュー名と、表示する条件（Finder で動画を選んだとき） |
+| `QuickAction/Master Reel.workflow/Contents/document.wflow` | Automator のワークフロー本体。`run-quick-action` を呼ぶだけ |
+| `QuickAction/Master Reel.workflow/Contents/Resources/run-quick-action` | 出力名を決めて `master-reel` を実行し、結果を通知する |
+
 ## 2 つのモード
 
 | | 画像モード（既定） | 動画モード（`--video`） |
