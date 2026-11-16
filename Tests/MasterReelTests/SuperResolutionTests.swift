@@ -55,6 +55,29 @@ struct SuperResolutionTests {
         #expect(ColorTags(format) == expected)
     }
 
+    @Test func 超解像しながら進捗を更新する() async throws {
+        let output = temporaryURL("mov")
+        defer { try? FileManager.default.removeItem(at: output) }
+        let progress = Progress(totalUnitCount: 1000)
+
+        try await upscaleVideo(input: fixture("small.mp4"), output: output, inputType: .image, interpolate: false, progress: progress)
+
+        // 最後のフレームの時刻は動画の長さより1フレーム分手前なので、100% の少し手前で終わる。
+        #expect(progress.fractionCompleted > 0.9)
+    }
+
+    @Test func 進捗が中止されたら途中で止めて出力を残さない() async throws {
+        let output = temporaryURL("mov")
+        let progress = Progress(totalUnitCount: 1000)
+        progress.cancel()
+
+        let error = try await #require(throws: UpscaleError.self) {
+            try await upscaleVideo(input: fixture("small.mp4"), output: output, inputType: .image, interpolate: false, progress: progress)
+        }
+        #expect(error.errorDescription == "キャンセルしました。")
+        #expect(!FileManager.default.fileExists(atPath: output.path))
+    }
+
     @Test func 上限を超える解像度はエラーで出力を作らない() async throws {
         let output = temporaryURL("mp4")
         let error = try await #require(throws: UpscaleError.self) {
