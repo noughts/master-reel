@@ -26,6 +26,22 @@ struct SuperResolutionTests {
         #expect(audioFormat.mediaSubType == .mpeg4AAC)
     }
 
+    @Test func タイルに分けて超解像しても元の絵を保つ() async throws {
+        let output = temporaryURL("mov")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        // 1280x720 の画像モードは、480x270 のタイルに分けて超解像する。
+        try await upscaleVideo(input: fixture("small-720p.mp4"), output: output, inputType: .image, interpolate: false)
+
+        let video = try #require(try await AVURLAsset(url: output).loadTracks(withMediaType: .video).first)
+        #expect(try await video.load(.naturalSize) == CGSize(width: 5120, height: 2880))
+        // 入力と出力を同じ大きさに縮小して比べると、ほぼ一致する。タイルの位置を誤ると大きくずれる。
+        let source = try await decodedFrames(of: fixture("small-720p.mp4"), width: 320, height: 180)
+        let upscaled = try await decodedFrames(of: output, width: 320, height: 180)
+        #expect(upscaled.count == 3)
+        #expect(meanAbsoluteDifference(source, upscaled) < 3)
+    }
+
     @Test func 補間フレームを前後のフレームの中間時刻に挟む() async throws {
         let output = temporaryURL("mov")
         defer { try? FileManager.default.removeItem(at: output) }
@@ -157,21 +173,53 @@ private func temporaryURL(_ pathExtension: String) -> URL {
         .appendingPathExtension(pathExtension)
 }
 
-/// 動画をデコードし、映像フレームの表示時刻を表示順に返す。
-/// 圧縮されたまま読むと編集リストによるずれや空のサンプルが混ざるため、デコード後の時刻を使う。
-private func presentationTimes(of url: URL) async throws -> [CMTime] {
+/// 動画を BGRA にデコードし、映像フレームのサンプルを表示順に返す。outputSettings で縮小もできる。
+/// 圧縮されたまま読むと編集リストによるずれや空のサンプルが混ざるため、デコード後のサンプルを使う。
+private func decodedSamples(of url: URL, outputSettings: [String: Any] = [:]) async throws -> [CMSampleBuffer] {
     let asset = AVURLAsset(url: url)
     let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
     let reader = try AVAssetReader(asset: asset)
-    let output = AVAssetReaderTrackOutput(track: track, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+    let output = AVAssetReaderTrackOutput(
+        track: track,
+        outputSettings: outputSettings.merging([kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]) { $1 }
+    )
     reader.add(output)
     reader.startReading()
-    var times: [CMTime] = []
+    var samples: [CMSampleBuffer] = []
     while let sample = output.copyNextSampleBuffer() {
         if sample.imageBuffer != nil {
-            times.append(sample.presentationTimeStamp)
+            samples.append(sample)
         }
     }
-    return times
+    return samples
 }
 
+/// 動画の映像フレームの表示時刻を、表示順に返す。
+private func presentationTimes(of url: URL) async throws -> [CMTime] {
+    try await decodedSamples(of: url).map(\.presentationTimeStamp)
+}
+
+/// 動画の各フレームを width x height に縮小した BGRA の画素として、表示順に返す。
+private func decodedFrames(of url: URL, width: Int, height: Int) async throws -> [[UInt8]] {
+    let samples = try await decodedSamples(of: url, outputSettings: [
+        kCVPixelBufferWidthKey as String: width,
+        kCVPixelBufferHeightKey as String: height,
+    ])
+    return try samples.map { sample in
+        let buffer = try #require(sample.imageBuffer)
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let base = try #require(CVPixelBufferGetBaseAddress(buffer))
+        let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
+        return (0..<height).flatMap { row in
+            Array(UnsafeRawBufferPointer(start: base + row * rowBytes, count: width * 4))
+        }
+    }
+}
+
+/// 同じ大きさのフレーム列どうしの、画素値（0〜255）の差の絶対値の平均。
+private func meanAbsoluteDifference(_ a: [[UInt8]], _ b: [[UInt8]]) -> Double {
+    let pairs = zip(a.joined(), b.joined())
+    let total = pairs.reduce(0) { $0 + abs(Int($1.0) - Int($1.1)) }
+    return Double(total) / Double(a.joined().count)
+}
