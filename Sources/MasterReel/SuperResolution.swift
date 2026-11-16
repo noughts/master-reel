@@ -13,6 +13,7 @@ enum UpscaleError: LocalizedError {
     case frameSetupFailed
     case readFailed(Error?)
     case writeFailed(Error?)
+    case cancelled
 
     var errorDescription: String? {
         switch self {
@@ -38,6 +39,8 @@ enum UpscaleError: LocalizedError {
             "入力動画の読み込みに失敗しました: \(error?.localizedDescription ?? "不明なエラー")"
         case let .writeFailed(error):
             "出力動画の書き出しに失敗しました: \(error?.localizedDescription ?? "不明なエラー")"
+        case .cancelled:
+            "キャンセルしました。"
         }
     }
 }
@@ -52,12 +55,14 @@ private typealias AudioPassthrough = (output: AVAssetReaderTrackOutput, input: A
 /// inputType が .video なら前フレームを参照して時間方向に安定させ、.image なら各フレームを独立に処理する。
 /// interpolate が true なら、超解像したフレームの間をフレーム補間で埋めてフレームレートを2倍にする。
 /// 先に補間すると超解像するフレームが倍になって遅くなるため、超解像してから補間する。
+/// 進捗を progress に書き込み、progress が中止されたら途中で止める。
 /// ファイルの読み書き、ML モデルのダウンロード、標準エラーへの進捗出力を伴う。
 func upscaleVideo(
     input: URL,
     output: URL,
     inputType: VTSuperResolutionScalerConfiguration.InputType,
-    interpolate: Bool
+    interpolate: Bool,
+    progress: Progress = Progress()
 ) async throws {
     guard let fileType = outputFileType(forPathExtension: output.pathExtension) else {
         throw UpscaleError.unsupportedOutputType(output.pathExtension)
@@ -137,7 +142,8 @@ func upscaleVideo(
             processor: processor,
             interpolator: interpolator,
             inputType: inputType,
-            duration: duration.seconds
+            duration: duration.seconds,
+            progress: progress
         )
     } catch {
         // 書き出し側が原因なら、その理由を優先して伝える。
@@ -201,13 +207,15 @@ private func ensureModelAvailable(for configuration: VTSuperResolutionScalerConf
 /// AVAssetWriter はトラック間の時刻を揃えて書くため、片方だけを先に流し込むと止まる。
 /// そのため受け入れ可能になった入力から順に供給する。
 /// interpolator があれば、超解像したフレームと前のフレームの間に補間フレームを挟む。
+/// progress が中止されたら、次のフレームを処理する前に UpscaleError.cancelled を投げる。
 private func transfer(
     video: (output: AVAssetReaderTrackOutput, adaptor: AVAssetWriterInputPixelBufferAdaptor),
     audio: [AudioPassthrough],
     processor: VTFrameProcessor,
     interpolator: VTFrameProcessor?,
     inputType: VTSuperResolutionScalerConfiguration.InputType,
-    duration: Double
+    duration: Double,
+    progress: Progress
 ) async throws {
     let videoInput = video.adaptor.assetWriterInput
     var videoFinished = false
@@ -221,6 +229,7 @@ private func transfer(
     let start = ContinuousClock.now
 
     while !videoFinished || !pendingAudio.isEmpty {
+        if progress.isCancelled { throw UpscaleError.cancelled }
         var progressed = false
 
         if !videoFinished, videoInput.isReadyForMoreMediaData {
@@ -243,6 +252,7 @@ private func transfer(
                     frames += 1
                     let elapsed = (ContinuousClock.now - start) / .seconds(1)
                     printStatus("\r" + progressLine(position: time.seconds, duration: duration, frames: frames, elapsed: elapsed), terminator: "")
+                    updateMenuBarProgress(progress, fraction: progressFraction(position: time.seconds, duration: duration), elapsed: elapsed)
                 }
             } else {
                 videoInput.markAsFinished()

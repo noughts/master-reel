@@ -27,6 +27,8 @@ swift build -c release
 - 出力のコンテナ形式は拡張子（`.mov` / `.mp4` / `.m4v`）で決まります。
 - 出力ファイルが既にある場合は上書きせず、エラーで終了します。
 - 処理中は標準エラーに進捗（割合・処理済みフレーム数・速度・残り時間）を表示します。
+- 同じ進捗をメニューバーの歯車にも出します（後述の「メニューバーの進捗」を参照）。
+- 中止されたときは書きかけの出力を消し、終了コード 130 で終わります。
 
 ### オプション
 
@@ -55,6 +57,8 @@ QuickAction/install.sh
   - 拡張子が `.mov` / `.mp4` / `.m4v` 以外の入力は `.mov` で書き出します。
   - 同じ名前のファイルがあれば `元の名前-4x 2.拡張子` のように番号を付けます。
 - 画像モード（既定）で処理し、完了・失敗は通知で知らせます。集中モード中はバナーが出ず、通知センターに残ります。
+- 処理中の進捗はメニューバーの歯車で確かめられます（後述の「メニューバーの進捗」を参照）。歯車の × で中止すると、まだ処理していない動画も含めて止め、「キャンセルしました」と通知します。
+- Automator の実行はすぐに終わり、処理は裏で続きます。
 - 「超解像＋フレーム補間」は、入力の高さが 1080 を超える動画では失敗します（後述の「フレーム補間」を参照）。
 - 「デスクトップ」「書類」「ダウンロード」の動画で初めて使うときは、フォルダへのアクセス許可を求めるダイアログが出ます。
 - アンインストールするには `~/Library/Services` の 2 つのワークフローを削除します。
@@ -64,7 +68,17 @@ QuickAction/install.sh
 | `QuickAction/install.sh` | ビルドし、雛形のワークフローから 2 つのクイックアクションを作ってインストールする |
 | `QuickAction/Master Reel.workflow/Contents/Info.plist` | メニュー名と、表示する条件（Finder で動画を選んだとき）。メニュー名はインストール時に書き換える |
 | `QuickAction/Master Reel.workflow/Contents/document.wflow` | Automator のワークフロー本体。`run-quick-action` を呼ぶだけ。呼び出すパスと `--interpolate` の有無はインストール時に書き換える |
-| `QuickAction/Master Reel.workflow/Contents/Resources/run-quick-action` | 出力名を決めて `master-reel` を実行し、結果を通知する |
+| `QuickAction/Master Reel.workflow/Contents/Resources/run-quick-action` | 出力名を決めて `master-reel` を実行し、結果を通知する。中止されたら残りの動画を処理しない |
+
+## メニューバーの進捗
+
+処理中は、メニューバーに歯車のアイコンが出ます。クリックすると、次のように表示されます。
+
+- 入力ファイル名
+- 「超解像中 (36%  残り約 2:20)」のような割合と残り時間（フレーム補間するときは「超解像とフレーム補間中」）
+- 中止ボタン（×）。押すと、処理中のフレームが終わったところで止まります。
+
+この歯車は、AppleScript の進捗表示にも使われるシステムの ScriptMonitor です。公開されていないキー名で進捗を渡しているため、今後の macOS で表示されなくなる可能性があります。その場合も処理そのものは続きます。
 
 ## 2 つのモード
 
@@ -108,7 +122,7 @@ swift test
 |---|---|
 | `ArgumentsTests` | 引数の解析 |
 | `EncodingSettingsTests` | 出力形式・エンコード設定 |
-| `ProgressTests` | 進捗表示の文字列 |
+| `ProgressTests` | 進捗表示の文字列（ターミナルとメニューバー） |
 | `FrameInterpolationTests` | 補間フレームの時刻の計算 |
 | `SuperResolutionTests` | 実際に VideoToolbox で超解像する統合テスト。`Tests/MasterReelTests/Fixtures` の小さな動画を使う |
 
@@ -123,4 +137,5 @@ swift test
 | `SuperResolution.swift` | 動画の読み込み・超解像・書き出し |
 | `FrameInterpolation.swift` | 超解像したフレームの間を補間する |
 | `EncodingSettings.swift` | 出力のコンテナ形式とエンコード設定 |
-| `Progress.swift` | 進捗表示の文字列を作る |
+| `Progress.swift` | 進捗の割合・残り時間と、進捗表示の文字列を作る |
+| `MenuBarProgress.swift` | メニューバーの歯車（ScriptMonitor）に進捗を出す |

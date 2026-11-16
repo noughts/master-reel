@@ -1,5 +1,18 @@
 import Foundation
 
+/// 処理済みの割合（0〜1）。
+/// - Parameters:
+///   - position: 最後に処理したフレームの時刻（秒）
+///   - duration: 動画の長さ（秒）
+func progressFraction(position: Double, duration: Double) -> Double {
+    duration > 0 ? min(max(position / duration, 0), 1) : 0
+}
+
+/// これまでの速度が続くとしたときの残り秒数。始まる前と終わった後は nil。
+func remainingSeconds(fraction: Double, elapsed: Double) -> Double? {
+    fraction > 0 && fraction < 1 ? elapsed * (1 - fraction) / fraction : nil
+}
+
 /// 進捗表示の1行を作る。
 /// - Parameters:
 ///   - position: 最後に処理したフレームの時刻（秒）
@@ -7,14 +20,21 @@ import Foundation
 ///   - frames: 処理済みフレーム数
 ///   - elapsed: 処理開始からの経過時間（秒）
 func progressLine(position: Double, duration: Double, frames: Int, elapsed: Double) -> String {
-    let fraction = duration > 0 ? min(max(position / duration, 0), 1) : 0
+    let fraction = progressFraction(position: position, duration: duration)
     let percent = String(format: "%5.1f%%", fraction * 100)
     let fps = elapsed > 0 ? String(format: "%.1f fps", Double(frames) / elapsed) : "- fps"
     var line = "超解像中 \(percent)  \(frames) フレーム  \(fps)"
-    if fraction > 0, fraction < 1 {
-        line += "  残り約 \(formatDuration(elapsed * (1 - fraction) / fraction))"
+    if let remaining = remainingSeconds(fraction: fraction, elapsed: elapsed) {
+        line += "  残り約 \(formatDuration(remaining))"
     }
     return line
+}
+
+/// メニューバーの進捗に添える「36%  残り約 0:38」のような説明を作る。
+func menuBarProgressDetail(fraction: Double, elapsed: Double) -> String {
+    let percent = "\(Int(fraction * 100))%"
+    guard let remaining = remainingSeconds(fraction: fraction, elapsed: elapsed) else { return percent }
+    return "\(percent)  残り約 \(formatDuration(remaining))"
 }
 
 /// 秒数を「m:ss」または「h:mm:ss」にする。

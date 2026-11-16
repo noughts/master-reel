@@ -25,6 +25,15 @@ struct ProgressTests {
         #expect(progressLine(position: -1, duration: 10, frames: 1, elapsed: 1).hasPrefix("超解像中   0.0%"))
     }
 
+    @Test func メニューバーには割合と残り時間を出す() {
+        #expect(menuBarProgressDetail(fraction: 0.255, elapsed: 30) == "25%  残り約 1:28")
+    }
+
+    @Test func メニューバーでは始まる前と終わった後は割合だけを出す() {
+        #expect(menuBarProgressDetail(fraction: 0, elapsed: 0) == "0%")
+        #expect(menuBarProgressDetail(fraction: 1, elapsed: 120) == "100%")
+    }
+
     @Test func 時間の表記() {
         #expect(formatDuration(0) == "0:00")
         #expect(formatDuration(59.6) == "1:00")

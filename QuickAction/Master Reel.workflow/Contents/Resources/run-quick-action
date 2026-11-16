@@ -42,13 +42,22 @@ output_path() {
     print -r -- "$candidate"
 }
 
+# 進捗は master-reel がメニューバーの歯車に出す。そこで中止されたら、残りの動画も処理しない。
 for input in "$@"; do
     output=$(output_path "$input")
-    if log=$("$cli" "${cli_options[@]}" "$input" "$output" 2>&1); then
+    log=$("$cli" "${cli_options[@]}" "$input" "$output" 2>&1)
+    case $? in
+    0)
         notify "${task}が完了しました" "${output:t}"
-    else
+        ;;
+    130)
+        notify "${task}をキャンセルしました" "${input:t}"
+        break
+        ;;
+    *)
         # 進捗表示と同じ行に続くことがあるので、最後の「エラー: 」以降の1行を取り出す。
         message="${log##*エラー: }"
         notify "${task}に失敗しました" "${input:t}: ${message%%$'\n'*}"
-    fi
+        ;;
+    esac
 done
