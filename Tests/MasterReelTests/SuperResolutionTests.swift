@@ -11,7 +11,7 @@ struct SuperResolutionTests {
         let output = temporaryURL("mov")
         defer { try? FileManager.default.removeItem(at: output) }
 
-        try await upscaleVideo(input: fixture("small.mp4"), output: output, inputType: inputType)
+        try await upscaleVideo(input: fixture("small.mp4"), output: output, inputType: inputType, interpolate: false)
 
         let scale = try #require(VTSuperResolutionScalerConfiguration.supportedScaleFactors.max())
         let asset = AVURLAsset(url: output)
@@ -19,11 +19,25 @@ struct SuperResolutionTests {
         let (size, formats) = try await video.load(.naturalSize, .formatDescriptions)
         #expect(size == CGSize(width: 160 * scale, height: 90 * scale))
         #expect(formats.first?.mediaSubType == .hevc)
-        #expect(try await sampleCount(of: video, in: asset) == 12)
+        #expect(try await presentationTimes(of: output).count == 12)
 
         let audio = try #require(try await asset.loadTracks(withMediaType: .audio).first)
         let audioFormat = try #require(try await audio.load(.formatDescriptions).first)
         #expect(audioFormat.mediaSubType == .mpeg4AAC)
+    }
+
+    @Test func 補間フレームを前後のフレームの中間時刻に挟む() async throws {
+        let output = temporaryURL("mov")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        try await upscaleVideo(input: fixture("small.mp4"), output: output, inputType: .image, interpolate: true)
+
+        let sourceTimes = try await presentationTimes(of: fixture("small.mp4"))
+        let middleTimes = zip(sourceTimes, sourceTimes.dropFirst()).map { midpointTime($0, $1) }
+        let expected = (sourceTimes + middleTimes).sorted { $0 < $1 }
+        #expect(expected.count == 23)
+        let actual = try await presentationTimes(of: output)
+        #expect(actual == expected)
     }
 
     @Test(arguments: [
@@ -34,7 +48,7 @@ struct SuperResolutionTests {
         let output = temporaryURL("mov")
         defer { try? FileManager.default.removeItem(at: output) }
 
-        try await upscaleVideo(input: fixture(name), output: output, inputType: .video)
+        try await upscaleVideo(input: fixture(name), output: output, inputType: .video, interpolate: false)
 
         let video = try #require(try await AVURLAsset(url: output).loadTracks(withMediaType: .video).first)
         let format = try #require(try await video.load(.formatDescriptions).first)
@@ -44,9 +58,18 @@ struct SuperResolutionTests {
     @Test func 上限を超える解像度はエラーで出力を作らない() async throws {
         let output = temporaryURL("mp4")
         let error = try await #require(throws: UpscaleError.self) {
-            try await upscaleVideo(input: fixture("too-large.mp4"), output: output, inputType: .video)
+            try await upscaleVideo(input: fixture("too-large.mp4"), output: output, inputType: .video, interpolate: false)
         }
         #expect(error.errorDescription == "入力解像度 1920x1440 は超解像の対象外です（上限 1920x1080）。")
+        #expect(!FileManager.default.fileExists(atPath: output.path))
+    }
+
+    @Test func 超解像後に補間の上限を超える解像度はエラーで出力を作らない() async throws {
+        let output = temporaryURL("mp4")
+        let error = try await #require(throws: UpscaleError.self) {
+            try await upscaleVideo(input: fixture("too-large.mp4"), output: output, inputType: .image, interpolate: true)
+        }
+        #expect(error.errorDescription == "超解像後の解像度 7680x5760 はフレーム補間の対象外です（上限 8192x4320）。")
         #expect(!FileManager.default.fileExists(atPath: output.path))
     }
 
@@ -56,7 +79,7 @@ struct SuperResolutionTests {
         defer { try? FileManager.default.removeItem(at: output) }
 
         let error = try await #require(throws: UpscaleError.self) {
-            try await upscaleVideo(input: fixture("small.mp4"), output: output, inputType: .video)
+            try await upscaleVideo(input: fixture("small.mp4"), output: output, inputType: .video, interpolate: false)
         }
         #expect(error.errorDescription == "出力ファイルが既に存在します: \(output.path)")
         #expect(try Data(contentsOf: output) == Data("existing".utf8))
@@ -64,14 +87,14 @@ struct SuperResolutionTests {
 
     @Test func 存在しない入力はエラー() async throws {
         let error = try await #require(throws: UpscaleError.self) {
-            try await upscaleVideo(input: URL(filePath: "/nonexistent.mp4"), output: temporaryURL("mp4"), inputType: .video)
+            try await upscaleVideo(input: URL(filePath: "/nonexistent.mp4"), output: temporaryURL("mp4"), inputType: .video, interpolate: false)
         }
         #expect(error.errorDescription == "入力ファイルが見つかりません: /nonexistent.mp4")
     }
 
     @Test func 非対応の拡張子はエラー() async throws {
         let error = try await #require(throws: UpscaleError.self) {
-            try await upscaleVideo(input: fixture("small.mp4"), output: temporaryURL("mkv"), inputType: .video)
+            try await upscaleVideo(input: fixture("small.mp4"), output: temporaryURL("mkv"), inputType: .video, interpolate: false)
         }
         #expect(error.errorDescription == "出力の拡張子 .mkv には対応していません（.mov / .mp4 / .m4v のいずれか）。")
     }
@@ -111,15 +134,21 @@ private func temporaryURL(_ pathExtension: String) -> URL {
         .appendingPathExtension(pathExtension)
 }
 
-/// トラックの圧縮サンプル数（= フレーム数）を数える。
-private func sampleCount(of track: AVAssetTrack, in asset: AVAsset) async throws -> Int {
+/// 動画をデコードし、映像フレームの表示時刻を表示順に返す。
+/// 圧縮されたまま読むと編集リストによるずれや空のサンプルが混ざるため、デコード後の時刻を使う。
+private func presentationTimes(of url: URL) async throws -> [CMTime] {
+    let asset = AVURLAsset(url: url)
+    let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
     let reader = try AVAssetReader(asset: asset)
-    let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+    let output = AVAssetReaderTrackOutput(track: track, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
     reader.add(output)
     reader.startReading()
-    var count = 0
+    var times: [CMTime] = []
     while let sample = output.copyNextSampleBuffer() {
-        count += sample.numSamples
+        if sample.imageBuffer != nil {
+            times.append(sample.presentationTimeStamp)
+        }
     }
-    return count
+    return times
 }
+

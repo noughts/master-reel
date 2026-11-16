@@ -2,6 +2,7 @@
 
 macOS の VideoToolbox に入っている AI 超解像（`VTSuperResolutionScaler`）を使って、動画を高解像度化する CLI です。
 848x480 の動画なら 3392x1920 に、縦横それぞれ 4 倍に拡大します。
+`--interpolate` を付けると、AI フレーム補間（`VTFrameRateConversion`）でフレームレートも 2 倍にします。
 
 ## 必要な環境
 
@@ -32,6 +33,7 @@ swift build -c release
 | オプション | 説明 |
 |---|---|
 | `--video` | 動画モードで超解像します（後述） |
+| `--interpolate` | フレーム補間でフレームレートを 2 倍にします（後述） |
 | `-h`, `--help` | ヘルプを表示します |
 
 ## Finder の右クリックから使う
@@ -40,22 +42,28 @@ swift build -c release
 QuickAction/install.sh
 ```
 
-リリースビルドを行い、クイックアクション「超解像」を `~/Library/Services/Master Reel.workflow` にインストールします。
+リリースビルドを行い、次の 2 つのクイックアクションを `~/Library/Services` にインストールします。
 再実行すると、ビルドし直したものに置き換わります。
 
-- Finder で動画を右クリックし、「超解像」を選ぶと実行されます。
-- 出力は入力と同じフォルダに `元の名前-4x.拡張子` で書き出します。
+| メニュー | インストール先 | 出力名 |
+|---|---|---|
+| 超解像 | `Master Reel.workflow` | `元の名前-4x.拡張子` |
+| 超解像＋フレーム補間 | `Master Reel Interpolate.workflow` | `元の名前-4x-2xfps.拡張子` |
+
+- Finder で動画を右クリックし、「クイックアクション」からどちらかを選ぶと実行されます。
+- 出力は入力と同じフォルダに書き出します。
   - 拡張子が `.mov` / `.mp4` / `.m4v` 以外の入力は `.mov` で書き出します。
   - 同じ名前のファイルがあれば `元の名前-4x 2.拡張子` のように番号を付けます。
 - 画像モード（既定）で処理し、完了・失敗は通知で知らせます。集中モード中はバナーが出ず、通知センターに残ります。
+- 「超解像＋フレーム補間」は、入力の高さが 1080 を超える動画では失敗します（後述の「フレーム補間」を参照）。
 - 「デスクトップ」「書類」「ダウンロード」の動画で初めて使うときは、フォルダへのアクセス許可を求めるダイアログが出ます。
-- アンインストールするには `~/Library/Services/Master Reel.workflow` を削除します。
+- アンインストールするには `~/Library/Services` の 2 つのワークフローを削除します。
 
 | ファイル | 役割 |
 |---|---|
-| `QuickAction/install.sh` | ビルドしてインストールする |
-| `QuickAction/Master Reel.workflow/Contents/Info.plist` | メニュー名と、表示する条件（Finder で動画を選んだとき） |
-| `QuickAction/Master Reel.workflow/Contents/document.wflow` | Automator のワークフロー本体。`run-quick-action` を呼ぶだけ |
+| `QuickAction/install.sh` | ビルドし、雛形のワークフローから 2 つのクイックアクションを作ってインストールする |
+| `QuickAction/Master Reel.workflow/Contents/Info.plist` | メニュー名と、表示する条件（Finder で動画を選んだとき）。メニュー名はインストール時に書き換える |
+| `QuickAction/Master Reel.workflow/Contents/document.wflow` | Automator のワークフロー本体。`run-quick-action` を呼ぶだけ。呼び出すパスと `--interpolate` の有無はインストール時に書き換える |
 | `QuickAction/Master Reel.workflow/Contents/Resources/run-quick-action` | 出力名を決めて `master-reel` を実行し、結果を通知する |
 
 ## 2 つのモード
@@ -70,12 +78,24 @@ QuickAction/install.sh
 画像モードでは、細かい模様がフレームごとにわずかにちらつくことがあります。気になる場合は `--video` で見比べてください。
 動画モードは縦長の入力（1080x1920 など）を受け付けません。縦長の動画は画像モードで処理してください。
 
+## フレーム補間（`--interpolate`）
+
+超解像したフレームの間に、前後のフレームから作った中間のフレームを 1 枚ずつ挟み、フレームレートを 2 倍にします（24fps なら 48fps）。
+動きを推定して中間の位置に描くので、前のフレームを繰り返すよりなめらかになります。
+
+- 超解像してから補間します。先に補間すると超解像するフレームが倍になり、遅くなるためです。
+- 補間できるのは、超解像後の解像度が 8192x4320 以下、つまり入力の高さが 1080 以下の動画です。縦長の 1080x1920 などは補間できません。
+- 速度の目安（M5）: 4 秒・848x448・24fps の動画で、補間なし約 16 秒、補間あり約 23 秒。
+- シーンの切り替わりは検出しないため、切り替わりの間にも補間したフレームが入ります。
+- 再生時間は変わらないので、音声はそのままコピーします。
+
 ## 出力
 
 - **映像**:
   - HEVC Main10 で書き出します。
   - 超解像の出力は 16 bit 浮動小数なので、階調を保てる 10 bit で書き出します。
   - 色空間（BT.709、HLG / BT.2020 など）と回転情報は入力から引き継ぎます。
+  - フレームの時刻は入力のタイムスケールで書き出します。補間するときはタイムスケールを 2 倍にし、中間の時刻も丸めずに書きます。
 - **音声**: 再エンコードせず、そのままコピーします。
 
 ## 開発
@@ -89,6 +109,7 @@ swift test
 | `ArgumentsTests` | 引数の解析 |
 | `EncodingSettingsTests` | 出力形式・エンコード設定 |
 | `ProgressTests` | 進捗表示の文字列 |
+| `FrameInterpolationTests` | 補間フレームの時刻の計算 |
 | `SuperResolutionTests` | 実際に VideoToolbox で超解像する統合テスト。`Tests/MasterReelTests/Fixtures` の小さな動画を使う |
 
 `SuperResolutionTests` は、超解像に対応していない Mac では自動でスキップされます。
@@ -100,5 +121,6 @@ swift test
 | `main.swift` | エントリポイント。引数を解析して実行し、終了コードを返す |
 | `Arguments.swift` | 引数の解析とヘルプ文 |
 | `SuperResolution.swift` | 動画の読み込み・超解像・書き出し |
+| `FrameInterpolation.swift` | 超解像したフレームの間を補間する |
 | `EncodingSettings.swift` | 出力のコンテナ形式とエンコード設定 |
 | `Progress.swift` | 進捗表示の文字列を作る |
