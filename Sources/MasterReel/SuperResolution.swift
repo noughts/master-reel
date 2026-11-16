@@ -46,7 +46,7 @@ enum UpscaleError: LocalizedError {
 }
 
 /// 超解像した1フレームの入力と出力。次のフレームの処理で参照する。
-private typealias ProcessedFrame = (source: VTFrameProcessorFrame, output: VTFrameProcessorFrame)
+typealias ProcessedFrame = (source: VTFrameProcessorFrame, output: VTFrameProcessorFrame)
 
 /// 圧縮されたまま書き出しへ渡す音声トラックの読み書き口。
 private typealias AudioPassthrough = (output: AVAssetReaderTrackOutput, input: AVAssetWriterInput)
@@ -91,8 +91,14 @@ func upscaleVideo(
     let outputWidth = configuration.frameWidth * configuration.scaleFactor
     let outputHeight = configuration.frameHeight * configuration.scaleFactor
     let interpolation = interpolate ? try makeInterpolationConfiguration(width: outputWidth, height: outputHeight) : nil
-    try await ensureModelAvailable(for: configuration)
+    // タイルに分けるときは、プロセッサーをタイルの大きさで設定する。
+    let tiling = try makeTiling(width: configuration.frameWidth, height: configuration.frameHeight, inputType: inputType)
+    let processorConfiguration = tiling?.configuration ?? configuration
+    try await ensureModelAvailable(for: processorConfiguration)
     printStatus("\(configuration.frameWidth)x\(configuration.frameHeight) → \(outputWidth)x\(outputHeight)（\(configuration.scaleFactor)倍）")
+    if let grid = tiling?.grid {
+        printStatus("\(grid.tileWidth)x\(grid.tileHeight) のタイル \(grid.columns.count * grid.rows.count) 枚に分けて超解像します。")
+    }
     if interpolate {
         printStatus("フレーム補間でフレームレートを 2 倍にします。")
     }
@@ -129,7 +135,7 @@ func upscaleVideo(
     guard writer.startWriting() else { throw UpscaleError.writeFailed(writer.error) }
     writer.startSession(atSourceTime: .zero)
 
-    let processor = try startedProcessor(configuration)
+    let processor = try startedProcessor(processorConfiguration)
     defer { processor.endSession() }
     // 1つのセッションでは1種類の処理しかできないため、補間には別のプロセッサーを使う。
     let interpolator = try interpolation.map { try startedProcessor($0) }
@@ -140,6 +146,7 @@ func upscaleVideo(
             video: (videoOutput, adaptor),
             audio: audio,
             processor: processor,
+            tiling: tiling,
             interpolator: interpolator,
             inputType: inputType,
             duration: duration.seconds,
@@ -159,7 +166,7 @@ func upscaleVideo(
 }
 
 /// 入力解像度に対する超解像の設定を作る。対応できるうちで最大の倍率を使う。
-private func makeConfiguration(
+func makeConfiguration(
     width: Int,
     height: Int,
     inputType: VTSuperResolutionScalerConfiguration.InputType
@@ -206,12 +213,14 @@ private func ensureModelAvailable(for configuration: VTSuperResolutionScalerConf
 /// 映像を1フレームずつ超解像しながら、音声と交互に書き出す。
 /// AVAssetWriter はトラック間の時刻を揃えて書くため、片方だけを先に流し込むと止まる。
 /// そのため受け入れ可能になった入力から順に供給する。
+/// tiling があれば、各フレームをタイルに分けて超解像する。
 /// interpolator があれば、超解像したフレームと前のフレームの間に補間フレームを挟む。
 /// progress が中止されたら、次のフレームを処理する前に UpscaleError.cancelled を投げる。
 private func transfer(
     video: (output: AVAssetReaderTrackOutput, adaptor: AVAssetWriterInputPixelBufferAdaptor),
     audio: [AudioPassthrough],
     processor: VTFrameProcessor,
+    tiling: Tiling?,
     interpolator: VTFrameProcessor?,
     inputType: VTSuperResolutionScalerConfiguration.InputType,
     duration: Double,
@@ -242,9 +251,14 @@ private func transfer(
             } else if let sample = video.output.copyNextSampleBuffer() {
                 if let sourceBuffer = sample.imageBuffer {
                     let time = sample.presentationTimeStamp
-                    let frame = try await upscaleFrame(sourceBuffer, at: time, previous: previous, submissionMode: submissionMode, processor: processor, pool: video.adaptor.pixelBufferPool)
+                    let pool = video.adaptor.pixelBufferPool
+                    let frame = if let tiling {
+                        try await upscaleFrameInTiles(sourceBuffer, at: time, tiling: tiling, processor: processor, pool: pool)
+                    } else {
+                        try await upscaleFrame(sourceBuffer, at: time, previous: previous, submissionMode: submissionMode, processor: processor, pool: pool)
+                    }
                     if let interpolator, let previous {
-                        let middle = try await interpolateFrame(between: previous.output, and: frame.output, processor: interpolator, pool: video.adaptor.pixelBufferPool)
+                        let middle = try await interpolateFrame(between: previous.output, and: frame.output, processor: interpolator, pool: pool)
                         pendingVideo.append(middle)
                     }
                     pendingVideo.append(frame.output)
@@ -285,7 +299,7 @@ private func transfer(
 
 /// 1フレームを超解像する。.sequential では前フレームの入力と出力を参照し、フレーム間のちらつきを抑える。
 /// .random では前フレームを参照せず、フレームを独立に処理する。
-private func upscaleFrame(
+func upscaleFrame(
     _ sourceBuffer: CVPixelBuffer,
     at time: CMTime,
     previous: ProcessedFrame?,
