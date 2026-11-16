@@ -1,10 +1,21 @@
 #!/bin/zsh
-# Finder のクイックアクション「超解像」から、選択された動画のパスを受け取って実行される。
+# Finder のクイックアクションから、選択された動画のパスを受け取って実行される。
 # 各動画を同じフォルダに「元の名前-4x.拡張子」として超解像し、結果を通知で知らせる。
+# 「超解像＋フレーム補間」からは先頭に --interpolate が渡され、フレームレートも 2 倍にして「元の名前-4x-2xfps.拡張子」に書き出す。
 
 set -u
 
 readonly cli="${0:A:h}/master-reel"
+
+cli_options=()
+suffix=-4x
+task=超解像
+if [[ "${1:-}" == --interpolate ]]; then
+    cli_options=(--interpolate)
+    suffix=-4x-2xfps
+    task=超解像とフレーム補間
+    shift
+fi
 
 # 通知センターに通知を出す（副作用）。
 notify() {
@@ -21,7 +32,7 @@ output_path() {
     local extension="${input:e:l}"
     # 対応する拡張子は EncodingSettings.swift の outputFileType と合わせる。
     [[ "$extension" == (mov|mp4|m4v) ]] || extension=mov
-    local base="${input:r}-4x"
+    local base="${input:r}$suffix"
     local candidate="$base.$extension"
     local number=2
     while [[ -e "$candidate" ]]; do
@@ -33,11 +44,11 @@ output_path() {
 
 for input in "$@"; do
     output=$(output_path "$input")
-    if log=$("$cli" "$input" "$output" 2>&1); then
-        notify "超解像が完了しました" "${output:t}"
+    if log=$("$cli" "${cli_options[@]}" "$input" "$output" 2>&1); then
+        notify "${task}が完了しました" "${output:t}"
     else
         # 進捗表示と同じ行に続くことがあるので、最後の「エラー: 」以降の1行を取り出す。
         message="${log##*エラー: }"
-        notify "超解像に失敗しました" "${input:t}: ${message%%$'\n'*}"
+        notify "${task}に失敗しました" "${input:t}: ${message%%$'\n'*}"
     fi
 done

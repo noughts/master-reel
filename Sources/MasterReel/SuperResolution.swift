@@ -8,6 +8,8 @@ enum UpscaleError: LocalizedError {
     case noVideoTrack
     case processorUnsupported
     case unsupportedResolution(width: Int, height: Int, inputType: VTSuperResolutionScalerConfiguration.InputType)
+    case interpolationUnsupported
+    case unsupportedInterpolationResolution(width: Int, height: Int)
     case frameSetupFailed
     case readFailed(Error?)
     case writeFailed(Error?)
@@ -26,8 +28,12 @@ enum UpscaleError: LocalizedError {
             "この Mac では VTSuperResolutionScaler を利用できません。"
         case let .unsupportedResolution(width, height, inputType):
             "入力解像度 \(width)x\(height) は超解像の対象外です（上限 \(inputType == .image ? "1920x1920" : "1920x1080")）。"
+        case .interpolationUnsupported:
+            "この Mac では VTFrameRateConversion（フレーム補間）を利用できません。"
+        case let .unsupportedInterpolationResolution(width, height):
+            "超解像後の解像度 \(width)x\(height) はフレーム補間の対象外です（上限 8192x4320）。"
         case .frameSetupFailed:
-            "超解像するフレームの準備に失敗しました。"
+            "処理するフレームの準備に失敗しました。"
         case let .readFailed(error):
             "入力動画の読み込みに失敗しました: \(error?.localizedDescription ?? "不明なエラー")"
         case let .writeFailed(error):
@@ -44,8 +50,15 @@ private typealias AudioPassthrough = (output: AVAssetReaderTrackOutput, input: A
 
 /// 入力動画を超解像して出力ファイルに書き出す。
 /// inputType が .video なら前フレームを参照して時間方向に安定させ、.image なら各フレームを独立に処理する。
+/// interpolate が true なら、超解像したフレームの間をフレーム補間で埋めてフレームレートを2倍にする。
+/// 先に補間すると超解像するフレームが倍になって遅くなるため、超解像してから補間する。
 /// ファイルの読み書き、ML モデルのダウンロード、標準エラーへの進捗出力を伴う。
-func upscaleVideo(input: URL, output: URL, inputType: VTSuperResolutionScalerConfiguration.InputType) async throws {
+func upscaleVideo(
+    input: URL,
+    output: URL,
+    inputType: VTSuperResolutionScalerConfiguration.InputType,
+    interpolate: Bool
+) async throws {
     guard let fileType = outputFileType(forPathExtension: output.pathExtension) else {
         throw UpscaleError.unsupportedOutputType(output.pathExtension)
     }
@@ -66,14 +79,18 @@ func upscaleVideo(input: URL, output: URL, inputType: VTSuperResolutionScalerCon
         throw UpscaleError.readFailed(error)
     }
     guard let videoTrack = videoTracks.first else { throw UpscaleError.noVideoTrack }
-    let (size, transform) = try await videoTrack.load(.naturalSize, .preferredTransform)
+    let (size, transform, timeScale) = try await videoTrack.load(.naturalSize, .preferredTransform, .naturalTimeScale)
     let duration = try await asset.load(.duration)
 
     let configuration = try makeConfiguration(width: Int(size.width), height: Int(size.height), inputType: inputType)
-    try await ensureModelAvailable(for: configuration)
     let outputWidth = configuration.frameWidth * configuration.scaleFactor
     let outputHeight = configuration.frameHeight * configuration.scaleFactor
+    let interpolation = interpolate ? try makeInterpolationConfiguration(width: outputWidth, height: outputHeight) : nil
+    try await ensureModelAvailable(for: configuration)
     printStatus("\(configuration.frameWidth)x\(configuration.frameHeight) → \(outputWidth)x\(outputHeight)（\(configuration.scaleFactor)倍）")
+    if interpolate {
+        printStatus("フレーム補間でフレームレートを 2 倍にします。")
+    }
 
     // 映像は超解像の入力形式にデコードして HEVC で書き出す。
     // 色空間は各フレームの付加情報として引き継ぐ（upscaleFrame を参照）。
@@ -84,6 +101,9 @@ func upscaleVideo(input: URL, output: URL, inputType: VTSuperResolutionScalerCon
     reader.add(videoOutput)
     let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoOutputSettings(width: outputWidth, height: outputHeight))
     videoInput.transform = transform
+    // 既定のタイムスケール（600）では時刻が丸められるため、入力のタイムスケールで書く。
+    // 補間フレームは2つのフレームの中間に入るので、タイムスケールを2倍にして中間の時刻も表せるようにする。
+    videoInput.mediaTimeScale = timeScale * (interpolate ? 2 : 1)
     let adaptor = AVAssetWriterInputPixelBufferAdaptor(
         assetWriterInput: videoInput,
         sourcePixelBufferAttributes: configuration.destinationPixelBufferAttributes
@@ -104,12 +124,21 @@ func upscaleVideo(input: URL, output: URL, inputType: VTSuperResolutionScalerCon
     guard writer.startWriting() else { throw UpscaleError.writeFailed(writer.error) }
     writer.startSession(atSourceTime: .zero)
 
-    let processor = VTFrameProcessor()
-    try processor.startSession(configuration: configuration)
+    let processor = try startedProcessor(configuration)
     defer { processor.endSession() }
+    // 1つのセッションでは1種類の処理しかできないため、補間には別のプロセッサーを使う。
+    let interpolator = try interpolation.map { try startedProcessor($0) }
+    defer { interpolator?.endSession() }
 
     do {
-        try await transfer(video: (videoOutput, adaptor), audio: audio, processor: processor, inputType: inputType, duration: duration.seconds)
+        try await transfer(
+            video: (videoOutput, adaptor),
+            audio: audio,
+            processor: processor,
+            interpolator: interpolator,
+            inputType: inputType,
+            duration: duration.seconds
+        )
     } catch {
         // 書き出し側が原因なら、その理由を優先して伝える。
         let cause = writer.status == .failed ? UpscaleError.writeFailed(writer.error) : error
@@ -145,6 +174,13 @@ private func makeConfiguration(
     return configuration
 }
 
+/// 設定した処理のセッションを始めたプロセッサーを返す（ML モデルの読み込みを伴う）。
+private func startedProcessor(_ configuration: some VTFrameProcessorConfiguration) throws -> VTFrameProcessor {
+    let processor = VTFrameProcessor()
+    try processor.startSession(configuration: configuration)
+    return processor
+}
+
 /// 超解像の ML モデルが未取得ならダウンロードし、進捗を表示する（ネットワーク通信を伴う）。
 private func ensureModelAvailable(for configuration: VTSuperResolutionScalerConfiguration) async throws {
     guard configuration.configurationModelStatus != .ready else { return }
@@ -164,15 +200,19 @@ private func ensureModelAvailable(for configuration: VTSuperResolutionScalerConf
 /// 映像を1フレームずつ超解像しながら、音声と交互に書き出す。
 /// AVAssetWriter はトラック間の時刻を揃えて書くため、片方だけを先に流し込むと止まる。
 /// そのため受け入れ可能になった入力から順に供給する。
+/// interpolator があれば、超解像したフレームと前のフレームの間に補間フレームを挟む。
 private func transfer(
     video: (output: AVAssetReaderTrackOutput, adaptor: AVAssetWriterInputPixelBufferAdaptor),
     audio: [AudioPassthrough],
     processor: VTFrameProcessor,
+    interpolator: VTFrameProcessor?,
     inputType: VTSuperResolutionScalerConfiguration.InputType,
     duration: Double
 ) async throws {
     let videoInput = video.adaptor.assetWriterInput
     var videoFinished = false
+    // 1フレームの超解像で補間フレームと合わせて2フレームできることがあるので、書き出しを待つ列に積んでから1つずつ書く。
+    var pendingVideo: [VTFrameProcessorFrame] = []
     var pendingAudio = audio
     // 動画モードは前フレームを参照して順に処理し、画像モードは各フレームを独立に処理する。
     let submissionMode: VTSuperResolutionScalerParameters.SubmissionMode = inputType == .video ? .sequential : .random
@@ -185,13 +225,20 @@ private func transfer(
 
         if !videoFinished, videoInput.isReadyForMoreMediaData {
             progressed = true
-            if let sample = video.output.copyNextSampleBuffer() {
+            if !pendingVideo.isEmpty {
+                let frame = pendingVideo.removeFirst()
+                guard video.adaptor.append(frame.buffer, withPresentationTime: frame.presentationTimeStamp) else {
+                    throw UpscaleError.writeFailed(nil)
+                }
+            } else if let sample = video.output.copyNextSampleBuffer() {
                 if let sourceBuffer = sample.imageBuffer {
                     let time = sample.presentationTimeStamp
                     let frame = try await upscaleFrame(sourceBuffer, at: time, previous: previous, submissionMode: submissionMode, processor: processor, pool: video.adaptor.pixelBufferPool)
-                    guard video.adaptor.append(frame.output.buffer, withPresentationTime: time) else {
-                        throw UpscaleError.writeFailed(nil)
+                    if let interpolator, let previous {
+                        let middle = try await interpolateFrame(between: previous.output, and: frame.output, processor: interpolator, pool: video.adaptor.pixelBufferPool)
+                        pendingVideo.append(middle)
                     }
+                    pendingVideo.append(frame.output)
                     previous = frame
                     frames += 1
                     let elapsed = (ContinuousClock.now - start) / .seconds(1)
@@ -236,13 +283,9 @@ private func upscaleFrame(
     processor: VTFrameProcessor,
     pool: CVPixelBufferPool?
 ) async throws -> ProcessedFrame {
-    var outputBuffer: CVPixelBuffer?
     guard
-        let pool,
-        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &outputBuffer) == kCVReturnSuccess,
-        let outputBuffer,
         let source = VTFrameProcessorFrame(buffer: sourceBuffer, presentationTimeStamp: time),
-        let output = VTFrameProcessorFrame(buffer: outputBuffer, presentationTimeStamp: time),
+        let output = makeDestinationFrame(pool: pool, at: time),
         let parameters = VTSuperResolutionScalerParameters(
             sourceFrame: source,
             previousFrame: submissionMode == .sequential ? previous?.source : nil,
@@ -256,6 +299,13 @@ private func upscaleFrame(
     // 同名でフレーム列を返す（処理完了を待たない）版と取り違えないよう、戻り値の型で処理完了を待つ版を選ぶ。
     let _: any VTFrameProcessorParameters = try await processor.process(parameters: parameters)
     // 色空間などの付加情報を入力フレームから引き継ぎ、エンコーダーが出力に正しい色情報を付けられるようにする。
-    CVBufferPropagateAttachments(sourceBuffer, outputBuffer)
+    CVBufferPropagateAttachments(sourceBuffer, output.buffer)
     return (source, output)
+}
+
+/// 処理結果を受け取るフレームを、プールから確保したバッファーで作る。確保できなければ nil。
+func makeDestinationFrame(pool: CVPixelBufferPool?, at time: CMTime) -> VTFrameProcessorFrame? {
+    var buffer: CVPixelBuffer?
+    guard let pool, CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess, let buffer else { return nil }
+    return VTFrameProcessorFrame(buffer: buffer, presentationTimeStamp: time)
 }
